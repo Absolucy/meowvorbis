@@ -1,0 +1,9 @@
+{
+	"rust-analyzer.assist.emitMustUse": true,
+	"rust-analyzer.check.command": "clippy",
+	"rust-analyzer.inlayHints.lifetimeElisionHints.enable": "skip_trivial",
+	"rust-analyzer.lru.capacity": 512,
+	"rust-analyzer.restartServerOnConfigChange": true,
+	"rust-analyzer.typing.autoClosingAngleBrackets.enable": true,
+	"rust-analyzer.rustfmt.extraArgs": ["+nightly"]
+}
