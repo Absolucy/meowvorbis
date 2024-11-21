@@ -17,25 +17,37 @@ pub fn optimize(path: impl AsRef<Path>) -> Result<isize> {
 	let path = path.as_ref();
 	let mut original_ogg = std::fs::read(path)
 		.map(Cursor::new)
-		.wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+		.wrap_err("failed to read file")?;
 	let mut optimized_ogg = AtomicWriteFile::open(path)
 		.map(BufWriter::new)
-		.wrap_err_with(|| format!("Failed to create file {}", path.display()))?;
+		.wrap_err("failed to create atomic output file")?;
 	match OggToOgg::new_with_defaults()
 		.remux(&mut original_ogg, &mut optimized_ogg)
-		.wrap_err_with(|| format!("Failed to optimize {}", path.display()))
+		.wrap_err("failed to optimize file with optivorbis")
 	{
 		Ok(_) => (),
 		Err(err) => {
-			let _ = optimized_ogg.into_inner()?.discard();
+			optimized_ogg
+				.into_inner()
+				.wrap_err("failed to unwrap bufwriter")?
+				.discard()
+				.wrap_err("failed to discard temporary file")?;
 			return Err(err);
 		}
 	}
-	let original_size = original_ogg.seek(SeekFrom::End(0))? as isize;
-	let optimized_size = optimized_ogg.seek(SeekFrom::End(0))? as isize;
-	optimized_ogg.flush()?;
-	let atomic_file = optimized_ogg.into_inner()?;
-	atomic_file.commit()?;
+	let original_size = original_ogg
+		.seek(SeekFrom::End(0))
+		.wrap_err("failed to get original file size")? as isize;
+	let optimized_size = optimized_ogg
+		.seek(SeekFrom::End(0))
+		.wrap_err("failed to get optimized file size")? as isize;
+	optimized_ogg.flush().wrap_err("failed to flush buffer")?;
+	let atomic_file = optimized_ogg
+		.into_inner()
+		.wrap_err("failed to unwrap atomic bufwriter")?;
+	atomic_file
+		.commit()
+		.wrap_err("failed to commit atomic file")?;
 	Ok(original_size - optimized_size)
 }
 
@@ -59,15 +71,18 @@ fn main() {
 	ogg_files
 		.par_iter()
 		.progress_count(total_oggs)
-		.for_each(|file| match optimize(file) {
-			Ok(bytes) => {
-				saved_bytes.fetch_add(bytes, Ordering::Relaxed);
-				min_diff.fetch_min(bytes, Ordering::Relaxed);
-				max_diff.fetch_max(bytes, Ordering::Relaxed);
-			}
-			Err(err) => {
-				let mut stderr = std::io::stderr().lock();
-				let _ = writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
+		.for_each(|file| {
+			match optimize(file).wrap_err_with(|| format!("failed to optimize {}", file.display()))
+			{
+				Ok(bytes) => {
+					saved_bytes.fetch_add(bytes, Ordering::Relaxed);
+					min_diff.fetch_min(bytes, Ordering::Relaxed);
+					max_diff.fetch_max(bytes, Ordering::Relaxed);
+				}
+				Err(err) => {
+					let mut stderr = std::io::stderr().lock();
+					let _ = writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
+				}
 			}
 		});
 	let saved_bytes = saved_bytes.load(Ordering::Relaxed);
