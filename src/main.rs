@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: 0BSD
 
+use atomic_write_file::AtomicWriteFile;
 use color_eyre::eyre::{Result, WrapErr};
 use indicatif::ParallelProgressIterator;
 use optivorbis::{OggToOgg, Remuxer};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
 	ffi::OsStr,
-	fs::File,
 	io::{BufWriter, Cursor, Seek, SeekFrom, Write},
 	path::{Path, PathBuf},
 	sync::atomic::{AtomicIsize, Ordering},
@@ -18,16 +18,24 @@ pub fn optimize(path: impl AsRef<Path>) -> Result<isize> {
 	let mut original_ogg = std::fs::read(path)
 		.map(Cursor::new)
 		.wrap_err_with(|| format!("Failed to read {}", path.display()))?;
-	let mut optimized_ogg = File::create(path)
+	let mut optimized_ogg = AtomicWriteFile::open(path)
 		.map(BufWriter::new)
 		.wrap_err_with(|| format!("Failed to create file {}", path.display()))?;
-	OggToOgg::new_with_defaults()
+	match OggToOgg::new_with_defaults()
 		.remux(&mut original_ogg, &mut optimized_ogg)
-		.wrap_err_with(|| format!("Failed to optimize {}", path.display()))?;
+		.wrap_err_with(|| format!("Failed to optimize {}", path.display()))
+	{
+		Ok(_) => (),
+		Err(err) => {
+			let _ = optimized_ogg.into_inner()?.discard();
+			return Err(err);
+		}
+	}
 	let original_size = original_ogg.seek(SeekFrom::End(0))? as isize;
 	let optimized_size = optimized_ogg.seek(SeekFrom::End(0))? as isize;
 	optimized_ogg.flush()?;
-	optimized_ogg.into_inner()?.sync_all()?;
+	let atomic_file = optimized_ogg.into_inner()?;
+	atomic_file.commit()?;
 	Ok(original_size - optimized_size)
 }
 
