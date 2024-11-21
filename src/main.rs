@@ -71,18 +71,15 @@ fn main() {
 	ogg_files
 		.par_iter()
 		.progress_count(total_oggs)
-		.for_each(|file| {
-			match optimize(file).wrap_err_with(|| format!("failed to optimize {}", file.display()))
-			{
-				Ok(bytes) => {
-					saved_bytes.fetch_add(bytes, Ordering::Relaxed);
-					min_diff.fetch_min(bytes, Ordering::Relaxed);
-					max_diff.fetch_max(bytes, Ordering::Relaxed);
-				}
-				Err(err) => {
-					let mut stderr = std::io::stderr().lock();
-					let _ = writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
-				}
+		.for_each(|file| match optimize(file) {
+			Ok(bytes) => {
+				saved_bytes.fetch_add(bytes, Ordering::Relaxed);
+				min_diff.fetch_min(bytes, Ordering::Relaxed);
+				max_diff.fetch_max(bytes, Ordering::Relaxed);
+			}
+			Err(err) => {
+				let mut stderr = std::io::stderr().lock();
+				let _ = writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
 			}
 		});
 	let saved_bytes = saved_bytes.load(Ordering::Relaxed);
