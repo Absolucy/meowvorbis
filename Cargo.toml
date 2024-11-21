@@ -1,6 +1,6 @@
 [package]
 name = "meowvorbis"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Lucy <lucy@absolucy.moe>"]
 edition = "2021"
 license = "0BSD"
