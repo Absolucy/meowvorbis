@@ -9,10 +9,16 @@ license = "0BSD"
 atomic-write-file = "0.2"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
-indicatif = { version = "0.17", features = ["rayon"] }
+console = "0.15"
+indicatif = { version = "0.17", features = ["rayon", "improved_unicode"] }
+num_cpus = "1"
+number_prefix = "0.4"
 optivorbis = "0.2"
+oxipng = { version = "9", features = ["parallel", "zopfli", "filetime"], default-features = false }
 rayon = "1"
+snmalloc-rs = "0.3"
 walkdir = "2"
+
 
 [profile.release]
 lto = "thin"

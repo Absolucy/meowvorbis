@@ -1,89 +1,142 @@
 // SPDX-License-Identifier: 0BSD
+#![warn(
+	clippy::correctness,
+	clippy::suspicious,
+	clippy::complexity,
+	clippy::perf,
+	clippy::style
+)]
 
-use atomic_write_file::AtomicWriteFile;
+pub mod args;
+pub mod display;
+pub mod optimize;
+pub mod select;
+
+use crate::{args::CliArgs, select::TargetedData};
+use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
-use indicatif::ParallelProgressIterator;
-use optivorbis::{OggToOgg, Remuxer};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
-	ffi::OsStr,
-	io::{BufWriter, Cursor, Seek, SeekFrom, Write},
-	path::{Path, PathBuf},
-	sync::atomic::{AtomicIsize, Ordering},
+	io::Write,
+	sync::atomic::{AtomicI64, AtomicU64, Ordering},
 };
-use walkdir::WalkDir;
 
-pub fn optimize(path: impl AsRef<Path>) -> Result<isize> {
-	let path = path.as_ref();
-	let mut original_ogg = std::fs::read(path)
-		.map(Cursor::new)
-		.wrap_err("failed to read file")?;
-	let mut optimized_ogg = AtomicWriteFile::open(path)
-		.map(BufWriter::new)
-		.wrap_err("failed to create atomic output file")?;
-	match OggToOgg::new_with_defaults()
-		.remux(&mut original_ogg, &mut optimized_ogg)
-		.wrap_err("failed to optimize file with optivorbis")
-	{
-		Ok(_) => (),
-		Err(err) => {
-			optimized_ogg
-				.into_inner()
-				.wrap_err("failed to unwrap bufwriter")?
-				.discard()
-				.wrap_err("failed to discard temporary file")?;
-			return Err(err);
-		}
-	}
-	let original_size = original_ogg
-		.seek(SeekFrom::End(0))
-		.wrap_err("failed to get original file size")? as isize;
-	let optimized_size = optimized_ogg
-		.seek(SeekFrom::End(0))
-		.wrap_err("failed to get optimized file size")? as isize;
-	optimized_ogg.flush().wrap_err("failed to flush buffer")?;
-	let atomic_file = optimized_ogg
-		.into_inner()
-		.wrap_err("failed to unwrap atomic bufwriter")?;
-	atomic_file
-		.commit()
-		.wrap_err("failed to commit atomic file")?;
-	Ok(original_size - optimized_size)
+#[global_allocator]
+static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
+#[derive(Default)]
+struct SizeStats {
+	success: AtomicU64,
+	failed: AtomicU64,
+	diff: AtomicI64,
 }
 
-fn main() {
-	let mut ogg_files = Vec::<PathBuf>::new();
-	for entry in WalkDir::new(".").into_iter().filter_map(|e| e.ok()) {
-		let path = entry.path();
-		if !path.is_file() {
-			continue;
-		}
-		match path.extension().and_then(OsStr::to_str) {
-			Some(ext) if ext.eq_ignore_ascii_case("ogg") => ogg_files.push(path.to_path_buf()),
-			_ => continue,
+impl SizeStats {
+	pub const fn const_new() -> Self {
+		Self {
+			success: AtomicU64::new(0),
+			failed: AtomicU64::new(0),
+			diff: AtomicI64::new(0),
 		}
 	}
-	let total_oggs = ogg_files.len() as u64;
-	println!("Optimizing {total_oggs} files...");
-	let saved_bytes = AtomicIsize::new(0);
-	let min_diff = AtomicIsize::new(0);
-	let max_diff = AtomicIsize::new(0);
-	ogg_files
-		.par_iter()
-		.progress_count(total_oggs)
-		.for_each(|file| match optimize(file) {
-			Ok(bytes) => {
-				saved_bytes.fetch_add(bytes, Ordering::Relaxed);
-				min_diff.fetch_min(bytes, Ordering::Relaxed);
-				max_diff.fetch_max(bytes, Ordering::Relaxed);
-			}
-			Err(err) => {
-				let mut stderr = std::io::stderr().lock();
-				let _ = writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
-			}
+}
+
+fn main() -> Result<()> {
+	color_eyre::install()?;
+	let args = CliArgs::parse();
+
+	rayon::ThreadPoolBuilder::new()
+		.num_threads(args.threads)
+		.build_global()
+		.wrap_err("failed to build global rayon pool")?;
+
+	let files = select::get_target_files_from_args(&args);
+	let total = TargetedData {
+		dmis: files.dmis.len(),
+		oggs: files.oggs.len(),
+	};
+	let stats = TargetedData::<SizeStats>::default();
+
+	let multi = MultiProgress::new();
+
+	// Create progress bars with custom styles
+	let progress_style = ProgressStyle::with_template(
+		"[{prefix:^9}] {bar:40.green/red.dim} {pos:>7}/{len:7} [{elapsed_precise}]\n{msg}",
+	)?
+	.progress_chars("█▓▒░");
+	let finished_progress_style = ProgressStyle::with_template(
+		"[{prefix:^9.green.bold}] {bar:40.green/red.dim} {pos:>7}/{len:7}\n{msg}",
+	)?
+	.progress_chars("█▓▒░");
+
+	let default_msg = display::render_message(None);
+
+	let dmi_progress = multi
+		.add(ProgressBar::new(total.dmis as u64))
+		.with_style(progress_style.clone())
+		.with_prefix("dmi/png")
+		.with_message(default_msg);
+
+	let ogg_progress = multi
+		.add(ProgressBar::new(total.oggs as u64))
+		.with_style(progress_style)
+		.with_prefix("ogg")
+		.with_message(display::render_message(None));
+
+	rayon::scope(|scope| {
+		scope.spawn(|_| {
+			let SizeStats {
+				success,
+				failed,
+				diff,
+			} = &stats.dmis;
+			files.dmis.par_iter().for_each(|file| {
+				match optimize::dmi(file) {
+					Ok(bytes) => {
+						success.fetch_add(1, Ordering::SeqCst);
+						diff.fetch_add(bytes as i64, Ordering::SeqCst);
+					}
+					Err(err) => {
+						failed.fetch_add(1, Ordering::SeqCst);
+						let mut stderr = std::io::stderr().lock();
+						let _ =
+							writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
+					}
+				}
+				dmi_progress.inc(1);
+				dmi_progress.set_message(display::render_message(Some(&stats.dmis)));
+			});
+			dmi_progress.set_style(finished_progress_style.clone());
+			dmi_progress.finish();
 		});
-	let saved_bytes = saved_bytes.load(Ordering::Relaxed);
-	let min_diff = min_diff.load(Ordering::Relaxed);
-	let max_diff = max_diff.load(Ordering::Relaxed);
-	println!("Saved {saved_bytes} bytes (min {min_diff}, max {max_diff})");
+
+		scope.spawn(|_| {
+			let SizeStats {
+				success,
+				failed,
+				diff,
+			} = &stats.oggs;
+			files.oggs.par_iter().for_each(|file| {
+				match optimize::ogg(file) {
+					Ok(bytes) => {
+						success.fetch_add(1, Ordering::SeqCst);
+						diff.fetch_add(bytes as i64, Ordering::SeqCst);
+					}
+					Err(err) => {
+						failed.fetch_add(1, Ordering::SeqCst);
+						let mut stderr = std::io::stderr().lock();
+						let _ =
+							writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
+					}
+				}
+				ogg_progress.inc(1);
+				ogg_progress.set_message(display::render_message(Some(&stats.oggs)));
+			});
+			ogg_progress.set_style(finished_progress_style.clone());
+			ogg_progress.finish();
+		});
+	});
+
+	Ok(())
 }
