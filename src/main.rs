@@ -23,20 +23,6 @@ use std::{
 	time::Instant,
 };
 
-#[cfg(all(feature = "snmalloc", feature = "mimalloc"))]
-compile_error!(
-	"Cannot compile with both \"snmalloc\" and \"mimalloc\" features, you can only select one or \
-	 neither!"
-);
-
-#[cfg(feature = "snmalloc")]
-#[global_allocator]
-static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
-
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 #[derive(Default)]
 struct SizeStats {
 	success: AtomicU64,
