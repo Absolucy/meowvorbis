@@ -15,15 +15,27 @@ pub mod select;
 use crate::{args::CliArgs, select::TargetedData};
 use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
 	io::Write,
 	sync::atomic::{AtomicI64, AtomicU64, Ordering},
+	time::Instant,
 };
 
+#[cfg(all(feature = "snmalloc", feature = "mimalloc"))]
+compile_error!(
+	"Cannot compile with both \"snmalloc\" and \"mimalloc\" features, you can only select one or \
+	 neither!"
+);
+
+#[cfg(feature = "snmalloc")]
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Default)]
 struct SizeStats {
@@ -51,6 +63,7 @@ fn main() -> Result<()> {
 		.build_global()
 		.wrap_err("failed to build global rayon pool")?;
 
+	let start = Instant::now();
 	let files = select::get_target_files_from_args(&args);
 	let total = TargetedData {
 		dmis: files.dmis.len(),
@@ -85,58 +98,74 @@ fn main() -> Result<()> {
 		.with_message(display::render_message(None));
 
 	rayon::scope(|scope| {
-		scope.spawn(|_| {
-			let SizeStats {
-				success,
-				failed,
-				diff,
-			} = &stats.dmis;
-			files.dmis.par_iter().for_each(|file| {
-				match optimize::dmi(file, args.fast) {
-					Ok(bytes) => {
-						success.fetch_add(1, Ordering::SeqCst);
-						diff.fetch_add(bytes as i64, Ordering::SeqCst);
+		if args.targets.dmi {
+			scope.spawn(|_| {
+				let SizeStats {
+					success,
+					failed,
+					diff,
+				} = &stats.dmis;
+				files.dmis.par_iter().for_each(|file| {
+					match optimize::dmi(file, args.fast) {
+						Ok(bytes) => {
+							success.fetch_add(1, Ordering::SeqCst);
+							diff.fetch_add(bytes as i64, Ordering::SeqCst);
+						}
+						Err(err) => {
+							failed.fetch_add(1, Ordering::SeqCst);
+							let mut stderr = std::io::stderr().lock();
+							let _ = writeln!(
+								stderr,
+								"Failed to optimize {file}: {err:?}",
+								file = file.display(),
+								err = err
+							);
+						}
 					}
-					Err(err) => {
-						failed.fetch_add(1, Ordering::SeqCst);
-						let mut stderr = std::io::stderr().lock();
-						let _ =
-							writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
-					}
-				}
-				dmi_progress.inc(1);
-				dmi_progress.set_message(display::render_message(Some(&stats.dmis)));
+					dmi_progress.inc(1);
+					dmi_progress.set_message(display::render_message(Some(&stats.dmis)));
+				});
+				dmi_progress.set_style(finished_progress_style.clone());
+				dmi_progress.finish();
 			});
-			dmi_progress.set_style(finished_progress_style.clone());
-			dmi_progress.finish();
-		});
+		}
 
-		scope.spawn(|_| {
-			let SizeStats {
-				success,
-				failed,
-				diff,
-			} = &stats.oggs;
-			files.oggs.par_iter().for_each(|file| {
-				match optimize::ogg(file) {
-					Ok(bytes) => {
-						success.fetch_add(1, Ordering::SeqCst);
-						diff.fetch_add(bytes as i64, Ordering::SeqCst);
+		if args.targets.ogg {
+			scope.spawn(|_| {
+				let SizeStats {
+					success,
+					failed,
+					diff,
+				} = &stats.oggs;
+				files.oggs.par_iter().for_each(|file| {
+					match optimize::ogg(file) {
+						Ok(bytes) => {
+							success.fetch_add(1, Ordering::SeqCst);
+							diff.fetch_add(bytes as i64, Ordering::SeqCst);
+						}
+						Err(err) => {
+							failed.fetch_add(1, Ordering::SeqCst);
+							let mut stderr = std::io::stderr().lock();
+							let _ = writeln!(
+								stderr,
+								"Failed to optimize {file}: {err:?}",
+								file = file.display(),
+								err = err
+							);
+						}
 					}
-					Err(err) => {
-						failed.fetch_add(1, Ordering::SeqCst);
-						let mut stderr = std::io::stderr().lock();
-						let _ =
-							writeln!(stderr, "Failed to optimize {}: {:?}", file.display(), err);
-					}
-				}
-				ogg_progress.inc(1);
-				ogg_progress.set_message(display::render_message(Some(&stats.oggs)));
+					ogg_progress.inc(1);
+					ogg_progress.set_message(display::render_message(Some(&stats.oggs)));
+				});
+				ogg_progress.set_style(finished_progress_style.clone());
+				ogg_progress.finish();
 			});
-			ogg_progress.set_style(finished_progress_style.clone());
-			ogg_progress.finish();
-		});
+		}
 	});
+	println!(
+		"Optimizations took {time}",
+		time = HumanDuration(start.elapsed()),
+	);
 
 	Ok(())
 }
