@@ -92,7 +92,7 @@ fn main() -> Result<()> {
 				diff,
 			} = &stats.dmis;
 			files.dmis.par_iter().for_each(|file| {
-				match optimize::dmi(file) {
+				match optimize::dmi(file, args.fast) {
 					Ok(bytes) => {
 						success.fetch_add(1, Ordering::SeqCst);
 						diff.fetch_add(bytes as i64, Ordering::SeqCst);

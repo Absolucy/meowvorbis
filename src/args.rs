@@ -13,6 +13,11 @@ pub struct CliArgs {
 	#[arg(short, long, default_value_t = default_threads())]
 	pub threads: usize,
 
+	/// Optimize dmi and png files faster, albeit with possibly larger file
+	/// sizes.
+	#[arg(short, long)]
+	pub fast: bool,
+
 	/// Files or folders to compress.
 	/// Folders will be searched recursively.
 	pub files: Vec<PathBuf>,
@@ -21,7 +26,7 @@ pub struct CliArgs {
 #[derive(Args)]
 #[group(required = true, multiple = true)]
 pub struct Targets {
-	/// Optimize dmi files (using oxipng)
+	/// Optimize dmi and png files (using oxipng)
 	#[arg(short, long)]
 	pub dmi: bool,
 
